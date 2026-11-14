@@ -46,6 +46,7 @@ def build_ass_subtitles(
     clip_end: float,
     title: str | None,
     words_per_chunk: int = 3,
+    has_cam: bool = False,
 ) -> str:
     """Create ASS subtitle content with active-word yellow highlight and optional hook title."""
     lines = [ASS_HEADER]
@@ -53,8 +54,10 @@ def build_ass_subtitles(
 
     if title:
         hook_end = min(3.5, clip_duration)
+        # Keep hook above facecam when facecam is enabled, or centered in top blur otherwise
+        hook_margin_v = 85 if has_cam else 250
         lines.append(
-            f"Dialogue: 1,0:00:00.00,{fmt_ass_time(hook_end)},Hook,,0,0,0,,{escape_ass(title.upper())}"
+            f"Dialogue: 1,0:00:00.00,{fmt_ass_time(hook_end)},Hook,,0,0,{hook_margin_v},,{escape_ass(title.upper())}"
         )
 
     clip_words = [
@@ -122,15 +125,21 @@ def snap_start_to_speech(words: list[dict], start: float, end: float, pad: float
     return start
 
 
-def build_cam_crop(cam_pos: str, cam_ratio: float = 0.28) -> str:
-    """Return ffmpeg crop expression for a corner facecam."""
-    w = f"iw*{cam_ratio:.2f}"
-    h = f"ih*{cam_ratio:.2f}"
+def build_cam_crop(cam_pos: str, cam_box: str | None = None) -> str:
+    """Return ffmpeg crop expression for a corner facecam or explicit normalized x,y,w,h box."""
+    if cam_box:
+        x, y, w, h = (float(v.strip()) for v in cam_box.split(","))
+        return f"crop=iw*{w:.4f}:ih*{h:.4f}:iw*{x:.4f}:ih*{y:.4f}"
+
+    w = "iw*0.145"
+    h = "ih*0.265"
+    mx = "iw*0.015"
+    my = "ih*0.015"
     positions = {
-        "top-left": f"crop={w}:{h}:0:0",
-        "top-right": f"crop={w}:{h}:iw-{w}:0",
-        "bottom-left": f"crop={w}:{h}:0:ih-{h}",
-        "bottom-right": f"crop={w}:{h}:iw-{w}:ih-{h}",
+        "top-left": f"crop={w}:{h}:{mx}:{my}",
+        "top-right": f"crop={w}:{h}:iw-{w}-{mx}:{my}",
+        "bottom-left": f"crop={w}:{h}:{mx}:ih-{h}-{my}",
+        "bottom-right": f"crop={w}:{h}:iw-{w}-{mx}:ih-{h}-{my}",
     }
     return positions[cam_pos]
 
@@ -143,6 +152,7 @@ def render_clip(
     ass_path: Path,
     layout: str,
     cam_pos: str = "none",
+    cam_box: str | None = None,
 ) -> None:
     """Render 1080x1920 vertical clip with ffmpeg (uses NVENC GPU if available)."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,16 +180,16 @@ def render_clip(
             f"crop=1080:1920,setsar=1,ass={ass_filename},format=yuv420p"
         )
         cmd.extend(["-vf", vf])
-    elif cam_pos != "none":
-        # Facecam split: cropped facecam on top (1080x610) + full 16:9 gameplay below
-        cam_crop = build_cam_crop(cam_pos)
+    elif cam_pos != "none" or cam_box:
+        # Facecam split: hook at top (y=90), facecam centered at y=220 (600px tall), gameplay at y=835
+        cam_crop = build_cam_crop(cam_pos, cam_box)
         fc = (
             "[0:v]scale=270:480:force_original_aspect_ratio=increase,"
-            "crop=270:480,boxblur=6:2,scale=1080:1920,eq=brightness=-0.15[bg];"
-            f"[0:v]{cam_crop},scale=1080:610:force_original_aspect_ratio=increase,crop=1080:610[cam];"
+            "crop=270:480,boxblur=6:2,scale=1080:1920,eq=brightness=-0.18[bg];"
+            f"[0:v]{cam_crop},scale=-2:600[cam];"
             "[0:v]scale=1080:-2:force_original_aspect_ratio=decrease[game];"
-            "[bg][cam]overlay=0:160[bgcam];"
-            f"[bgcam][game]overlay=(W-w)/2:810,setsar=1,ass={ass_filename},format=yuv420p[v]"
+            "[bg][cam]overlay=(W-w)/2:220[bgcam];"
+            f"[bgcam][game]overlay=(W-w)/2:835,setsar=1,ass={ass_filename},format=yuv420p[v]"
         )
         cmd.extend(["-filter_complex", fc, "-map", "[v]", "-map", "0:a?"])
     else:
@@ -252,6 +262,11 @@ def main() -> None:
         help="Optional corner facecam to stack above gameplay in gaming-split.",
     )
     parser.add_argument(
+        "--cam-box",
+        default=None,
+        help="Optional exact normalized facecam box x,y,w,h (e.g. 0.855,0.015,0.135,0.265).",
+    )
+    parser.add_argument(
         "--no-snap",
         action="store_true",
         help="Disable automatic snapping of start time to the first spoken word.",
@@ -267,7 +282,8 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     ass_path = out_path.with_suffix(".ass")
 
-    ass_content = build_ass_subtitles(words, start_t, args.end, args.title or None)
+    has_cam = args.cam_pos != "none" or bool(args.cam_box)
+    ass_content = build_ass_subtitles(words, start_t, args.end, args.title or None, has_cam=has_cam)
     ass_path.write_text(ass_content, encoding="utf-8")
 
     render_clip(
@@ -278,6 +294,7 @@ def main() -> None:
         ass_path=ass_path,
         layout=args.layout,
         cam_pos=args.cam_pos,
+        cam_box=args.cam_box,
     )
 
     meta_path = out_path.with_suffix(".metadata.txt")

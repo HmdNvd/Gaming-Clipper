@@ -14,15 +14,21 @@ a local video file and wants to extract viral 9:16 vertical clips.
 ## Prerequisites
 
 - Run all Python commands via `uv run` inside the project root so the managed
-  `.venv` (`yt-dlp`, `faster-whisper`) is used.
+  `.venv` (`yt-dlp`, `faster-whisper`, `numpy`) is used. Works on Windows, macOS,
+  and Linux.
 - `ffmpeg` must be available on `PATH`.
 
 ## Step-by-Step Pipeline
 
+### 0. Verify Environment (First Run)
+```bash
+uv run python scripts/check_env.py
+```
+
 ### 1. Fetch the Source Video
 Run `scripts/fetch_video.py` with the URL or local file path:
 
-```powershell
+```bash
 uv run python scripts/fetch_video.py --source "<URL_OR_PATH>" --out-dir workspace/source
 ```
 
@@ -31,7 +37,7 @@ Note the `video_path` printed in the JSON output.
 ### 2. Analyze Audio Energy & Transcribe
 Run `scripts/analyze_video.py` on the `video_path`:
 
-```powershell
+```bash
 uv run python scripts/analyze_video.py --input "<video_path>" --out workspace/analysis.json --model base
 ```
 
@@ -51,27 +57,29 @@ Pick **3 to 5 clips** following these retention rules:
 ### 4. Render Each 9:16 Vertical Clip
 Run `scripts/render_clip.py` for each selected moment:
 
-```powershell
-uv run python scripts/render_clip.py `
-  --input "<video_path>" `
-  --analysis workspace/analysis.json `
-  --start 124.5 `
-  --end 156.0 `
-  --title "NO WAY HE SURVIVED THAT" `
-  --layout gaming-split `
+```bash
+uv run python scripts/render_clip.py \
+  --input "<video_path>" \
+  --analysis workspace/analysis.json \
+  --start 124.5 \
+  --end 156.0 \
+  --title "NO WAY HE SURVIVED THAT" \
+  --layout gaming-split \
+  --style classic \
   --out workspace/clips/clip_01.mp4
 ```
 
-Layout options:
-- `gaming-split` (default): Blurred 9:16 background + crisp 16:9 gameplay centered so HUD and edges aren't lost.
-- `center-crop`: Full-screen 9:16 center crop (best for talking-head / IRL).
-- `--cam-pos top-left|top-right|bottom-left|bottom-right`: Optional corner facecam stacked large above gameplay in `gaming-split`.
+Options:
+- `--layout gaming-split` (default): Blurred 9:16 background + crisp 16:9 gameplay centered so HUD and edges aren't lost.
+- `--layout center-crop`: Full-screen 9:16 center crop (best for talking-head / IRL).
+- `--cam-pos top-left|top-right|bottom-left|bottom-right`: Optional corner facecam stacked large above gameplay in `gaming-split` (or `--cam-box x,y,w,h` for exact normalized coordinates).
+- `--style classic|neon|emerald|fire|clean`: Caption & hook color preset (`classic` = yellow, `neon` = cyan, `emerald` = green, `fire` = orange, `clean` = crisp white).
 - Start times automatically snap to the first spoken word (`--no-snap` to disable) so clips never open on dead air.
 
 ### 5. Clean Up Heavy Source Files & Deliver Results
 If the user doesn't need to keep the large downloaded source video/WAV, run:
 
-```powershell
+```bash
 uv run python scripts/cleanup.py
 ```
 

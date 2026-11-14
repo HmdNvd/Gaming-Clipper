@@ -7,7 +7,44 @@ import sys
 from pathlib import Path
 
 
-ASS_HEADER = """[Script Info]
+STYLE_PRESETS = {
+    "classic": {
+        "base_color": "&H00FFFFFF",
+        "active_ass": r"{\c&H00FFFF&}",
+        "reset_ass": r"{\c&HFFFFFF&}",
+        "hook_color": "&H0000FFFF",
+    },
+    "neon": {
+        "base_color": "&H00FFFFFF",
+        "active_ass": r"{\c&HFFFF00&}",
+        "reset_ass": r"{\c&HFFFFFF&}",
+        "hook_color": "&H00FFFF00",
+    },
+    "emerald": {
+        "base_color": "&H00FFFFFF",
+        "active_ass": r"{\c&H66FF00&}",
+        "reset_ass": r"{\c&HFFFFFF&}",
+        "hook_color": "&H0066FF00",
+    },
+    "fire": {
+        "base_color": "&H00FFFFFF",
+        "active_ass": r"{\c&H006BFF&}",
+        "reset_ass": r"{\c&HFFFFFF&}",
+        "hook_color": "&H00006BFF",
+    },
+    "clean": {
+        "base_color": "&H00CCCCCC",
+        "active_ass": r"{\c&HFFFFFF&}",
+        "reset_ass": r"{\c&HCCCCCC&}",
+        "hook_color": "&H00FFFFFF",
+    },
+}
+
+
+def build_ass_header(style: str = "classic") -> str:
+    """Build ASS header with the selected caption and hook style preset."""
+    preset = STYLE_PRESETS[style]
+    return f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
 PlayResY: 1920
@@ -15,8 +52,8 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Caption,Arial,74,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,2,2,60,60,560,1
-Style: Hook,Arial,80,&H0000FFFF,&H00FFFFFF,&H00000000,&HB0000000,-1,0,0,0,100,100,0,0,3,12,0,8,70,70,250,1
+Style: Caption,Arial,74,{preset['base_color']},&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,2,2,60,60,560,1
+Style: Hook,Arial,80,{preset['hook_color']},&H00FFFFFF,&H00000000,&HB0000000,-1,0,0,0,100,100,0,0,3,12,0,8,70,70,250,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -47,9 +84,11 @@ def build_ass_subtitles(
     title: str | None,
     words_per_chunk: int = 3,
     has_cam: bool = False,
+    style: str = "classic",
 ) -> str:
-    """Create ASS subtitle content with active-word yellow highlight and optional hook title."""
-    lines = [ASS_HEADER]
+    """Create ASS subtitle content with active-word highlight and optional hook title."""
+    preset = STYLE_PRESETS[style]
+    lines = [build_ass_header(style)]
     clip_duration = clip_end - clip_start
 
     if title:
@@ -82,7 +121,7 @@ def build_ass_subtitles(
             for j, w in enumerate(chunk):
                 txt = escape_ass(w["word"].upper())
                 if j == active_idx:
-                    parts.append(r"{\c&H00FFFF&}" + txt + r"{\c&HFFFFFF&}")
+                    parts.append(preset["active_ass"] + txt + preset["reset_ass"])
                 else:
                     parts.append(txt)
             lines.append(
@@ -271,6 +310,12 @@ def main() -> None:
         action="store_true",
         help="Disable automatic snapping of start time to the first spoken word.",
     )
+    parser.add_argument(
+        "--style",
+        choices=list(STYLE_PRESETS.keys()),
+        default="classic",
+        help="Caption and hook color preset.",
+    )
     parser.add_argument("--out", required=True, help="Output MP4 path.")
     args = parser.parse_args()
 
@@ -283,7 +328,9 @@ def main() -> None:
     ass_path = out_path.with_suffix(".ass")
 
     has_cam = args.cam_pos != "none" or bool(args.cam_box)
-    ass_content = build_ass_subtitles(words, start_t, args.end, args.title or None, has_cam=has_cam)
+    ass_content = build_ass_subtitles(
+        words, start_t, args.end, args.title or None, has_cam=has_cam, style=args.style
+    )
     ass_path.write_text(ass_content, encoding="utf-8")
 
     render_clip(

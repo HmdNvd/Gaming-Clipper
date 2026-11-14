@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+workspace/
+branding/
+*.mp4
+*.mkv
+*.wav
+*.ass
+.DS_Store
+Thumbs.db

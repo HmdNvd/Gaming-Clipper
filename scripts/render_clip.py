@@ -54,6 +54,7 @@ WrapStyle: 0
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Caption,Arial,74,{preset['base_color']},&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,6,2,2,60,60,560,1
 Style: Hook,Arial,80,{preset['hook_color']},&H00FFFFFF,&H00000000,&HB0000000,-1,0,0,0,100,100,0,0,3,12,0,8,70,70,250,1
+Style: Watermark,Arial,32,&H88FFFFFF,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,1,3,30,45,380,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -85,11 +86,17 @@ def build_ass_subtitles(
     words_per_chunk: int = 3,
     has_cam: bool = False,
     style: str = "classic",
+    watermark: str | None = None,
 ) -> str:
-    """Create ASS subtitle content with active-word highlight and optional hook title."""
+    """Create ASS subtitle content with active-word highlight, hook title, and optional watermark."""
     preset = STYLE_PRESETS[style]
     lines = [build_ass_header(style)]
     clip_duration = clip_end - clip_start
+
+    if watermark:
+        lines.append(
+            f"Dialogue: 2,0:00:00.00,{fmt_ass_time(clip_duration)},Watermark,,0,0,0,,{escape_ass(watermark)}"
+        )
 
     if title:
         hook_end = min(3.5, clip_duration)
@@ -164,6 +171,44 @@ def snap_start_to_speech(words: list[dict], start: float, end: float, pad: float
     return start
 
 
+def compute_speech_keeps(
+    words: list[dict], start: float, end: float, max_gap: float = 1.2, pad: float = 0.18
+) -> list[tuple[float, float]]:
+    """Return merged (seg_start, seg_end) speech intervals inside [start, end], cutting gaps > max_gap."""
+    intervals: list[list[float]] = []
+    for w in words:
+        if w["end"] <= start or w["start"] >= end:
+            continue
+        s = max(start, w["start"] - pad)
+        e = min(end, w["end"] + pad)
+        if intervals and s - intervals[-1][1] <= max_gap:
+            intervals[-1][1] = max(intervals[-1][1], e)
+        else:
+            intervals.append([s, e])
+    if not intervals:
+        return [(start, end)]
+    return [(round(s, 3), round(e, 3)) for s, e in intervals]
+
+
+def remap_words_for_keeps(words: list[dict], keeps: list[tuple[float, float]]) -> tuple[list[dict], float]:
+    """Remap word timestamps onto the concatenated timeline of keep intervals."""
+    remapped: list[dict] = []
+    offset = 0.0
+    for seg_s, seg_e in keeps:
+        seg_len = seg_e - seg_s
+        for w in words:
+            if w["end"] > seg_s and w["start"] < seg_e:
+                remapped.append(
+                    {
+                        "word": w["word"],
+                        "start": offset + max(0.0, w["start"] - seg_s),
+                        "end": offset + min(seg_len, w["end"] - seg_s),
+                    }
+                )
+        offset += seg_len
+    return remapped, round(offset, 3)
+
+
 def build_cam_crop(cam_pos: str, cam_box: str | None = None) -> str:
     """Return ffmpeg crop expression for a corner facecam or explicit normalized x,y,w,h box."""
     if cam_box:
@@ -192,6 +237,7 @@ def render_clip(
     layout: str,
     cam_pos: str = "none",
     cam_box: str | None = None,
+    keeps: list[tuple[float, float]] | None = None,
 ) -> None:
     """Render 1080x1920 vertical clip with ffmpeg (uses NVENC GPU if available)."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -201,45 +247,69 @@ def render_clip(
 
     # Use relative filename for ass filter to avoid Windows drive-letter escaping issues
     ass_filename = ass_path.name
+    use_concat = keeps is not None and len(keeps) >= 2
 
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-ss",
-        f"{start:.2f}",
-        "-i",
-        str(video_path.resolve()),
-        "-t",
-        f"{duration:.2f}",
-    ]
+    if use_concat:
+        cmd = ["ffmpeg", "-y", "-i", str(video_path.resolve())]
+        trim_parts = []
+        concat_inputs = []
+        for idx, (ks, ke) in enumerate(keeps):
+            trim_parts.append(f"[0:v]trim=start={ks:.3f}:end={ke:.3f},setpts=PTS-STARTPTS[tv{idx}];")
+            trim_parts.append(f"[0:a]atrim=start={ks:.3f}:end={ke:.3f},asetpts=PTS-STARTPTS[ta{idx}];")
+            concat_inputs.append(f"[tv{idx}][ta{idx}]")
+        pre_fc = (
+            "".join(trim_parts)
+            + "".join(concat_inputs)
+            + f"concat=n={len(keeps)}:v=1:a=1[srcv][srca];"
+        )
+        v_in = "[srcv]"
+        a_map = "[aout]"
+        a_filter = f";[srca]loudnorm=I=-14:TP=-1.5:LRA=11[aout]"
+    else:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{start:.2f}",
+            "-i",
+            str(video_path.resolve()),
+            "-t",
+            f"{duration:.2f}",
+        ]
+        pre_fc = ""
+        v_in = "[0:v]"
+        a_map = "0:a?"
+        a_filter = ""
 
     if layout == "center-crop":
-        vf = (
-            f"scale=1080:1920:force_original_aspect_ratio=increase,"
-            f"crop=1080:1920,setsar=1,ass={ass_filename},format=yuv420p"
+        fc = (
+            f"{pre_fc}{v_in}scale=1080:1920:force_original_aspect_ratio=increase,"
+            f"crop=1080:1920,setsar=1,ass={ass_filename},format=yuv420p[v]{a_filter}"
         )
-        cmd.extend(["-vf", vf])
+        cmd.extend(["-filter_complex", fc, "-map", "[v]", "-map", a_map])
     elif cam_pos != "none" or cam_box:
-        # Facecam split: hook at top (y=90), facecam centered at y=220 (600px tall), gameplay at y=835
+        # Facecam split: hook at top, lanczos+unsharp facecam at y=240 (520px tall), gameplay at y=775
         cam_crop = build_cam_crop(cam_pos, cam_box)
         fc = (
-            "[0:v]scale=270:480:force_original_aspect_ratio=increase,"
+            f"{pre_fc}{v_in}split=3[vbg][vcam][vgame];"
+            "[vbg]scale=270:480:force_original_aspect_ratio=increase,"
             "crop=270:480,boxblur=6:2,scale=1080:1920,eq=brightness=-0.18[bg];"
-            f"[0:v]{cam_crop},scale=-2:600[cam];"
-            "[0:v]scale=1080:-2:force_original_aspect_ratio=decrease[game];"
-            "[bg][cam]overlay=(W-w)/2:220[bgcam];"
-            f"[bgcam][game]overlay=(W-w)/2:835,setsar=1,ass={ass_filename},format=yuv420p[v]"
+            f"[vcam]{cam_crop},scale=-2:520:flags=lanczos,unsharp=5:5:0.7:5:5:0.0[cam];"
+            "[vgame]scale=1080:-2:force_original_aspect_ratio=decrease[game];"
+            "[bg][cam]overlay=(W-w)/2:240[bgcam];"
+            f"[bgcam][game]overlay=(W-w)/2:775,setsar=1,ass={ass_filename},format=yuv420p[v]{a_filter}"
         )
-        cmd.extend(["-filter_complex", fc, "-map", "[v]", "-map", "0:a?"])
+        cmd.extend(["-filter_complex", fc, "-map", "[v]", "-map", a_map])
     else:
         # gaming-split: downscale-blur background (8x faster than full-res boxblur) + crisp 16:9 gameplay
         fc = (
-            "[0:v]scale=270:480:force_original_aspect_ratio=increase,"
+            f"{pre_fc}{v_in}split=2[vbg][vfg];"
+            "[vbg]scale=270:480:force_original_aspect_ratio=increase,"
             "crop=270:480,boxblur=6:2,scale=1080:1920,eq=brightness=-0.12[bg];"
-            "[0:v]scale=1080:-2:force_original_aspect_ratio=decrease[fg];"
-            f"[bg][fg]overlay=(W-w)/2:(H-h)/2-80,setsar=1,ass={ass_filename},format=yuv420p[v]"
+            "[vfg]scale=1080:-2:force_original_aspect_ratio=decrease[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2-80,setsar=1,ass={ass_filename},format=yuv420p[v]{a_filter}"
         )
-        cmd.extend(["-filter_complex", fc, "-map", "[v]", "-map", "0:a?"])
+        cmd.extend(["-filter_complex", fc, "-map", "[v]", "-map", a_map])
 
     if has_nvenc():
         video_enc = [
@@ -261,10 +331,10 @@ def render_clip(
     else:
         video_enc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "17", "-maxrate", "12M", "-bufsize", "16M"]
 
+    audio_af = [] if use_concat else ["-af", "loudnorm=I=-14:TP=-1.5:LRA=11"]
     cmd.extend(
         [
-            "-af",
-            "loudnorm=I=-14:TP=-1.5:LRA=11",
+            *audio_af,
             *video_enc,
             "-c:a",
             "aac",
@@ -316,6 +386,22 @@ def main() -> None:
         default="classic",
         help="Caption and hook color preset.",
     )
+    parser.add_argument(
+        "--watermark",
+        default=None,
+        help="Optional channel handle watermark (e.g. @KlipDeck).",
+    )
+    parser.add_argument(
+        "--trim-silence",
+        action="store_true",
+        help="Automatically cut internal silent gaps longer than --silence-gap seconds.",
+    )
+    parser.add_argument(
+        "--silence-gap",
+        type=float,
+        default=1.2,
+        help="Minimum silent gap in seconds to trim when --trim-silence is enabled.",
+    )
     parser.add_argument("--out", required=True, help="Output MP4 path.")
     args = parser.parse_args()
 
@@ -328,8 +414,27 @@ def main() -> None:
     ass_path = out_path.with_suffix(".ass")
 
     has_cam = args.cam_pos != "none" or bool(args.cam_box)
+    keeps = None
+    sub_words = words
+    sub_start = start_t
+    sub_end = args.end
+
+    if args.trim_silence:
+        candidate_keeps = compute_speech_keeps(words, start_t, args.end, max_gap=args.silence_gap)
+        if len(candidate_keeps) >= 2:
+            keeps = candidate_keeps
+            sub_words, total_dur = remap_words_for_keeps(words, keeps)
+            sub_start = 0.0
+            sub_end = total_dur
+
     ass_content = build_ass_subtitles(
-        words, start_t, args.end, args.title or None, has_cam=has_cam, style=args.style
+        sub_words,
+        sub_start,
+        sub_end,
+        args.title or None,
+        has_cam=has_cam,
+        style=args.style,
+        watermark=args.watermark,
     )
     ass_path.write_text(ass_content, encoding="utf-8")
 
@@ -342,14 +447,16 @@ def main() -> None:
         layout=args.layout,
         cam_pos=args.cam_pos,
         cam_box=args.cam_box,
+        keeps=keeps,
     )
 
+    final_dur = (sub_end - sub_start) if keeps else (args.end - start_t)
     meta_path = out_path.with_suffix(".metadata.txt")
     hook_title = args.title.strip() if args.title else out_path.stem.replace("_", " ").title()
     meta_content = (
         f"Title: {hook_title}\n"
         f"Caption: {hook_title} 😂🔥 #gaming #shorts #gta #clips\n"
-        f"Duration: {args.end - start_t:.1f}s ({start_t:.1f}s - {args.end:.1f}s)\n"
+        f"Duration: {final_dur:.1f}s ({start_t:.1f}s - {args.end:.1f}s)\n"
     )
     meta_path.write_text(meta_content, encoding="utf-8")
     print(f"Rendered clip: {out_path}")

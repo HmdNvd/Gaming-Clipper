@@ -74,7 +74,13 @@ Options:
 - `--layout center-crop`: Full-screen 9:16 center crop (best for talking-head / IRL).
 - `--cam-pos top-left|top-right|bottom-left|bottom-right`: Optional corner facecam stacked large above gameplay in `gaming-split` (or `--cam-box x,y,w,h` for exact normalized coordinates).
 - `--style classic|neon|emerald|fire|clean`: Caption & hook color preset (`classic` = yellow, `neon` = cyan, `emerald` = green, `fire` = orange, `clean` = crisp white).
+- `--watermark "@Handle"`: Optional subtle semi-transparent channel handle in the bottom-right safe zone.
+- `--trim-silence` (with `--silence-gap 1.2`): Automatically cuts internal silent gaps longer than `1.2s` and keeps captions synced.
 - Start times automatically snap to the first spoken word (`--no-snap` to disable) so clips never open on dead air.
+
+Batch rendering & Top-5 countdowns:
+- `uv run python scripts/batch_render.py --input "<video>" --analysis workspace/analysis.json --clips-json clips.json`: Render multiple clips from one JSON manifest.
+- `uv run python scripts/compile_top5.py --clips c5.mp4 c4.mp4 c3.mp4 c2.mp4 c1.mp4 --title "TOP 5 MOMENTS" --out top5.mp4`: Stitch 2–10 clips into a `#N → #1` countdown Short.
 
 ### 5. Clean Up Heavy Source Files & Deliver Results
 If the user doesn't need to keep the large downloaded source video/WAV, run:

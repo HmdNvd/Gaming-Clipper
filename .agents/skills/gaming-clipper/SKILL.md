@@ -11,12 +11,12 @@ description: >-
 Use this skill whenever the user provides a video URL (YouTube, Twitch, Kick) or
 a local video file and wants to extract viral 9:16 vertical clips.
 
-## Prerequisites
+## Prerequisites (Local Machine Requirements)
 
-- Run all Python commands via `uv run` inside the project root so the managed
-  `.venv` (`yt-dlp`, `faster-whisper`, `numpy`) is used. Works on Windows, macOS,
-  and Linux.
-- `ffmpeg` must be available on `PATH`.
+All processing runs **100% locally on the user's machine** (no external cloud APIs):
+- `uv` (Python package manager) — runs `scripts/` inside `.venv` (`uv sync` installs `yt-dlp`, `faster-whisper`, and `numpy`).
+- `FFmpeg` installed and available on `PATH`.
+- Works on Windows, macOS, and Linux (auto-uses NVIDIA `h264_nvenc` when available, with automatic CPU fallback).
 
 ## Step-by-Step Pipeline
 

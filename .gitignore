@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 workspace/
 branding/
+dist/
 *.mp4
 *.mkv
 *.wav
